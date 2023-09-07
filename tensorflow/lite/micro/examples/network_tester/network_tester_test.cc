@@ -13,146 +13,101 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/lite/micro/examples/network_tester/expected_output_data.h"
-#include "tensorflow/lite/micro/examples/network_tester/input_data.h"
-#include "tensorflow/lite/micro/examples/network_tester/network_model.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_log.h"
-#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/micro_utils.h"
 #include "tensorflow/lite/micro/testing/micro_test.h"
 #include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 
-#ifdef ETHOS_U
-#include "tensorflow/lite/micro/examples/person_detection/testdata/person_image_data.h"
-#include "tensorflow/lite/micro/models/person_detect_model_data.h"
-#endif
+#include "tensorflow/lite/micro/examples/network_tester/ifm.h"
+#include "tensorflow/lite/micro/examples/network_tester/model.h"
 
-#ifndef TENSOR_ARENA_SIZE
-#ifdef ETHOS_U
-#define TENSOR_ARENA_SIZE (136 * 1024)
+#ifdef __GNUC__
+#include <unistd.h> 
 #else
-#define TENSOR_ARENA_SIZE (5 * 1024)
-#endif
-#endif
-
-#ifndef NUM_INFERENCES
-#define NUM_INFERENCES 1
+#include <direct.h>
 #endif
 
-uint8_t tensor_arena[TENSOR_ARENA_SIZE];
+#ifndef MODEL
+#define MODEL               1
+#endif
 
-#ifdef NUM_BYTES_TO_PRINT
-inline void print_output_data(TfLiteTensor* output) {
-  int num_bytes_to_print =
-      ((output->bytes < NUM_BYTES_TO_PRINT) || NUM_BYTES_TO_PRINT == 0)
-          ? output->bytes
-          : NUM_BYTES_TO_PRINT;
+#define MODEL_BASE_FOLDER   "../arm_m4_core/application/sabre_npu_tester/model"
+#define TENSOR_ARENA_SIZE	(300 * 1024)
+#define MAX_INPUTS			(2)
 
-  int dims_size = output->dims->size;
-  printf("{\n");
-  printf("\"dims\": [%d,", dims_size);
-  for (int i = 0; i < output->dims->size - 1; ++i) {
-    printf("%d,", output->dims->data[i]);
-  }
-  printf("%d],\n", output->dims->data[dims_size - 1]);
+#ifndef MIN
+#define MIN(x,y) ((x)<(y) ? (x) : (y))
+#endif
 
-  printf("\"data_address\": \"%p\",\n", output->data.raw);
-  printf("\"data\":\"");
-  for (int i = 0; i < num_bytes_to_print - 1; ++i) {
-    if (i % 16 == 0 && i != 0) {
-      printf("\n");
-    }
-    printf("0x%02x,", output->data.uint8[i]);
-  }
-  printf("0x%02x\"\n", output->data.uint8[num_bytes_to_print - 1]);
-  printf("}");
+alignas(16) uint8_t tensor_arena[TENSOR_ARENA_SIZE];
+
+namespace model_nn {
+    const uint8_t* get_buffer(int index);
 }
-#endif
 
-template <typename T>
-void check_output_elem(TfLiteTensor* output, const T* expected_output,
-                       const int index) {
-  TF_LITE_MICRO_EXPECT_EQ(tflite::GetTensorData<T>(output)[index],
-                          expected_output[index]);
+namespace ifm {
+    const uint8_t* get_buffer(int index);
+    uint32_t get_num_buffers(void);
 }
+
+
 
 TF_LITE_MICRO_TESTS_BEGIN
 
 TF_LITE_MICRO_TEST(TestInvoke) {
-#ifdef ETHOS_U
-  const tflite::Model* model = ::tflite::GetModel(g_person_detect_model_data);
-#else
-  const tflite::Model* model = ::tflite::GetModel(network_model);
-#endif
-  if (model->version() != TFLITE_SCHEMA_VERSION) {
-    MicroPrintf(
-        "Model provided is schema version %d not equal "
-        "to supported version %d.\n",
-        model->version(), TFLITE_SCHEMA_VERSION);
-    return kTfLiteError;
-  }
+	const uint8_t* model_bytes = NULL;
+	const uint8_t* input_data[MAX_INPUTS] = { 0 };
 
-  tflite::MicroMutableOpResolver<6> resolver;
-  resolver.AddAveragePool2D(tflite::Register_AVERAGE_POOL_2D_INT8());
-  resolver.AddConv2D(tflite::Register_CONV_2D_INT8());
-  resolver.AddDepthwiseConv2D(tflite::Register_DEPTHWISE_CONV_2D_INT8());
-  resolver.AddEthosU();
-  resolver.AddReshape();
-  resolver.AddSoftmax(tflite::Register_SOFTMAX_INT8());
+	// load model bytes 
+	model_bytes = model_nn::get_buffer(0);
 
-  tflite::MicroInterpreter interpreter(model, resolver, tensor_arena,
-                                       TENSOR_ARENA_SIZE);
+	// load on input buffers from memory
+	int inputs_cnt = MIN(MAX_INPUTS, ifm::get_num_buffers());
+	for (int i = 0; i < inputs_cnt; i++) {
+		input_data[i] = ifm::get_buffer(i);
+	}
+	   
+	const tflite::Model* model = ::tflite::GetModel(model_bytes);
 
-  TfLiteStatus allocate_status = interpreter.AllocateTensors();
-  if (allocate_status != kTfLiteOk) {
-    MicroPrintf("Tensor allocation failed\n");
-    return kTfLiteError;
-  }
+	if (model->version() != TFLITE_SCHEMA_VERSION) {
+		MicroPrintf(
+			"Model provided is schema version %d not equal "
+			"to supported version %d.\n",
+			model->version(), TFLITE_SCHEMA_VERSION);
+		return kTfLiteError;
+	}
 
-  for (int n = 0; n < NUM_INFERENCES; n++) {
-    for (size_t i = 0; i < interpreter.inputs_size(); ++i) {
-      TfLiteTensor* input = interpreter.input(i);
-#ifdef ETHOS_U
-      memcpy(input->data.int8, g_person_image_data, input->bytes);
-#else
-      memcpy(input->data.data, &input_data[i], input->bytes);
-#endif
-    }
-    TfLiteStatus invoke_status = interpreter.Invoke();
-    if (invoke_status != kTfLiteOk) {
-      MicroPrintf("Invoke failed\n");
-      return kTfLiteError;
-    }
-    TF_LITE_MICRO_EXPECT_EQ(kTfLiteOk, invoke_status);
+    static tflite::MicroMutableOpResolver<6> micro_op_resolver;
+	micro_op_resolver.AddFullyConnected(tflite::Register_FULLY_CONNECTED_INT8());  
+	micro_op_resolver.AddTranspose();
+	micro_op_resolver.AddReshape();
+	micro_op_resolver.AddSplit();
+	micro_op_resolver.AddPack();
+	micro_op_resolver.AddSoftmax(tflite::Register_SOFTMAX_INT8());
 
-#ifdef NUM_BYTES_TO_PRINT
-    // Print all of the output data, or the first NUM_BYTES_TO_PRINT bytes,
-    // whichever comes first as well as the output shape.
-    printf("num_of_outputs: %d\n", interpreter.outputs_size());
-    printf("output_begin\n");
-    printf("[\n");
-    for (int i = 0; i < interpreter.outputs_size(); i++) {
-      TfLiteTensor* output = interpreter.output(i);
-      print_output_data(output);
-      if (i != interpreter.outputs_size() - 1) {
-        printf(",\n");
-      }
-    }
-    printf("]\n");
-    printf("output_end\n");
-#endif
+	tflite::MicroInterpreter interpreter(model, micro_op_resolver, tensor_arena, TENSOR_ARENA_SIZE);
 
-#ifndef NO_COMPARE_OUTPUT_DATA
-    for (size_t i = 0; i < interpreter.outputs_size(); i++) {
-      TfLiteTensor* output = interpreter.output(i);
-      for (int j = 0; j < tflite::ElementCount(*(output->dims)); ++j) {
-        check_output_elem(output, &expected_output_data[i], j);
-      }
-    }
-#endif
-  }
-  MicroPrintf("Ran successfully\n");
+	TfLiteStatus allocate_status = interpreter.AllocateTensors();
+	if (allocate_status != kTfLiteOk) {
+		MicroPrintf("Tensor allocation failed\n");
+		return kTfLiteError;
+	}
+
+	for (size_t i = 0; i < interpreter.inputs_size(); ++i) {
+	  TfLiteTensor* input = interpreter.input(i);
+	  memcpy(input->data.data, &input_data[i], input->bytes);
+	}
+	
+	TfLiteStatus invoke_status = interpreter.Invoke();
+	if (invoke_status != kTfLiteOk) {
+	  MicroPrintf("Invoke failed\n");
+	  return kTfLiteError;
+	}
+	
+	TF_LITE_MICRO_EXPECT_EQ(kTfLiteOk, invoke_status);	
+	MicroPrintf("Ran successfully\n");
 }
 
 TF_LITE_MICRO_TESTS_END
